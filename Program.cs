@@ -2,14 +2,15 @@ using System;
 using System.Windows.Forms;
 using System.Drawing;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace LabWork
 {
     // ====================================================================
-    // 1. Структура для зберігання точок графіка
+    // 1. Структура DataPoint (Інкапсуляція, readonly)
     // ====================================================================
     /// <summary>
-    /// Представляє незмінну координату для точки графіка.
+    /// Представляє незмінну координату для точки графіка (x, y).
     /// </summary>
     public readonly struct DataPoint
     {
@@ -24,26 +25,32 @@ namespace LabWork
     }
 
     // ====================================================================
-    // 2. Клас для обчислення точок (Інкапсуляція математичної логіки)
+    // 2. Клас FunctionCalculator (Інкапсуляція математики)
     // ====================================================================
     /// <summary>
-    /// Клас для обчислення точок графіка функції y = (x + cos(2x)) / (x + 2).
+    /// Клас для обчислення точок графіка y = (x + cos(2x)) / (x + 2).
     /// </summary>
     public static class FunctionCalculator
     {
-        // Контрольні параметри, які визначають область графіка
         private const double X_START = 0.2;
         private const double X_END = 10.0;
         private const double DELTA_X = 0.8;
 
+        public static double XMin => X_START;
+        public static double XMax => X_END;
+
         /// <summary>
         /// Обчислює значення Y для заданого X.
         /// </summary>
+        /// <exception cref="DivideByZeroException">Викидається при x = -2.</exception>
         public static double CalculateY(double x)
         {
-            // y = (x + cos(2x)) / (x + 2)
-            // Ділення на нуль відсутнє у діапазоні X_START >= 0.2
-            return (x + Math.Cos(2 * x)) / (x + 2);
+            double denominator = x + 2;
+            if (Math.Abs(denominator) < 1e-9) // Захист від ділення на нуль
+            {
+                throw new DivideByZeroException("Ділення на нуль при x = -2.");
+            }
+            return (x + Math.Cos(2 * x)) / denominator;
         }
 
         /// <summary>
@@ -52,39 +59,42 @@ namespace LabWork
         public static List<DataPoint> GeneratePoints()
         {
             List<DataPoint> points = new List<DataPoint>();
-            for (double x = X_START; x <= X_END; x += DELTA_X)
+            for (double x = X_START; x <= X_END + DELTA_X / 2; x += DELTA_X) // + DELTA_X/2 для включення X_END
             {
-                double y = CalculateY(x);
-                points.Add(new DataPoint(x, y));
+                try
+                {
+                    double y = CalculateY(x);
+                    points.Add(new DataPoint(x, y));
+                }
+                catch (DivideByZeroException)
+                {
+                    // Обробка розривів функції
+                    Console.WriteLine($"Розрив функції при x = {x:F2}");
+                }
             }
             return points;
         }
-
-        /// <summary>
-        /// Повертає початкову межу X.
-        /// </summary>
-        public static double XMin => X_START;
-
-        /// <summary>
-        /// Повертає кінцеву межу X.
-        /// </summary>
-        public static double XMax => X_END;
     }
 
     // ====================================================================
-    // 3. Форма для відображення графіка
+    // 3. Клас PlottingForm (UI та логіка рендерингу)
     // ====================================================================
-    /// <summary>
-    /// Форма, яка відображає графік функції та масштабує його при зміні розмірів.
-    /// </summary>
     public class PlottingForm : Form
     {
-        private const double PADDING = 30; // Відступ від країв форми у пікселях
+        private const int PADDING = 40; // Відступ від країв
         private const double Y_PADDING_FACTOR = 0.1; // Запас по Y
-        
+
         private readonly List<DataPoint> _dataPoints;
         private double _yMin;
         private double _yMax;
+        
+        // GDI+ об'єкти для багаторазового використання (оптимізація)
+        private Pen _plotPen;
+        private Brush _pointBrush;
+        private Pen _axesPen;
+
+        // Змінна для додаткового завдання: перемикання режимів
+        private bool _isLineMode = true; 
 
         public PlottingForm()
         {
@@ -92,17 +102,52 @@ namespace LabWork
             this.Text = "Графік функції: y = (x + cos(2x)) / (x + 2)";
             this.Size = new Size(800, 600);
             
-            // Обчислення точок
-            _dataPoints = FunctionCalculator.GeneratePoints();
+            // Ініціалізація GDI+ об'єктів
+            _plotPen = new Pen(Color.Blue, 2);
+            _pointBrush = Brushes.Red;
+            _axesPen = Pens.Gray;
 
-            // Визначення діапазону Y
+            // Обчислення та визначення діапазону
+            _dataPoints = FunctionCalculator.GeneratePoints();
             CalculateYRange();
 
-            // Додаємо обробник події Paint, який викликається при перемальовуванні (включно з resize)
+            // Обробка події Paint (для малювання)
             this.Paint += PlottingForm_Paint;
+            // Обробка події Resize (викликає Paint)
+            this.Resize += (sender, e) => this.Invalidate();
             
-            // Вмикаємо подвійний буфер для зменшення мерехтіння при resize
+            // Вмикаємо подвійний буфер
             this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+
+            // Додаємо UI для додаткового завдання (перемикання режимів)
+            AddModeSwitchControls();
+        }
+
+        /// <summary>
+        /// Додає елементи керування для перемикання режиму відображення.
+        /// </summary>
+        private void AddModeSwitchControls()
+        {
+            RadioButton rbLine = new RadioButton { Text = "Лінійний", Checked = true, Location = new Point(10, 10), AutoSize = true };
+            RadioButton rbPoint = new RadioButton { Text = "Точковий", Checked = false, Location = new Point(10, 30), AutoSize = true };
+
+            rbLine.CheckedChanged += (s, e) => {
+                if (rbLine.Checked) 
+                {
+                    _isLineMode = true;
+                    this.Invalidate(); 
+                }
+            };
+            rbPoint.CheckedChanged += (s, e) => {
+                if (rbPoint.Checked) 
+                {
+                    _isLineMode = false;
+                    this.Invalidate(); 
+                }
+            };
+
+            this.Controls.Add(rbLine);
+            this.Controls.Add(rbPoint);
         }
 
         /// <summary>
@@ -110,25 +155,21 @@ namespace LabWork
         /// </summary>
         private void CalculateYRange()
         {
-            if (_dataPoints.Count == 0) return;
+            if (!_dataPoints.Any()) return;
 
-            _yMin = double.MaxValue;
-            _yMax = double.MinValue;
-
-            foreach (var p in _dataPoints)
-            {
-                if (p.Y < _yMin) _yMin = p.Y;
-                if (p.Y > _yMax) _yMax = p.Y;
-            }
+            _yMin = _dataPoints.Min(p => p.Y);
+            _yMax = _dataPoints.Max(p => p.Y);
 
             // Додаємо запас
             double yRange = _yMax - _yMin;
+            if (yRange == 0) yRange = 1.0; // Захист від випадку, коли всі Y однакові
+            
             _yMin -= yRange * Y_PADDING_FACTOR;
             _yMax += yRange * Y_PADDING_FACTOR;
         }
 
         /// <summary>
-        /// Основний обробник події Paint, який здійснює малювання та масштабування.
+        /// Основний метод малювання, викликається системою при необхідності.
         /// </summary>
         private void PlottingForm_Paint(object sender, PaintEventArgs e)
         {
@@ -138,71 +179,104 @@ namespace LabWork
 
             if (_dataPoints.Count < 2) return;
 
-            // 1. Налаштування області малювання
+            // 1. Налаштування масштабування
             double plotWidth = clientWidth - 2 * PADDING;
             double plotHeight = clientHeight - 2 * PADDING;
             
-            // Діапазони
             double xRange = FunctionCalculator.XMax - FunctionCalculator.XMin;
             double yRange = _yMax - _yMin;
             
-            // Масштаби
             double scaleX = plotWidth / xRange;
             double scaleY = plotHeight / yRange;
 
-            // 2. Функції перетворення координат (Масштабування)
+            // 2. Функції перетворення координат (Mapping math -> screen)
             
-            // Перетворює математичну X-координату у піксельну X-координату на формі
-            int ToScreenX(double x)
+            // Перетворює математичну X у піксельну X
+            int MapToScreenX(double x)
             {
                 return (int)(PADDING + (x - FunctionCalculator.XMin) * scaleX);
             }
 
-            // Перетворює математичну Y-координату у піксельну Y-координату на формі
-            // (Y пікселів зростає вниз, тому віднімаємо від верхньої межі області)
-            int ToScreenY(double y)
+            // Перетворює математичну Y у піксельну Y (з урахуванням інверсії Y у пікселях)
+            int MapToScreenY(double y)
             {
                 return (int)(clientHeight - PADDING - (y - _yMin) * scaleY);
             }
             
-            // 3. Малювання осей
+            // 3. Малювання осей і сітки (Спрощено)
+            DrawAxes(g, clientWidth, clientHeight, MapToScreenX, MapToScreenY);
             
-            int yAxisX = ToScreenX(FunctionCalculator.XMin); // Вісь Y на лівій межі X
-            int xAxisY = ToScreenY(0); // Вісь X на рівні Y=0 (якщо 0 у діапазоні)
+            // 4. Малювання графіка
+            DrawGraph(g, MapToScreenX, MapToScreenY);
+        }
+
+        /// <summary>
+        /// Малює осі координат та мітки.
+        /// </summary>
+        private void DrawAxes(Graphics g, int clientWidth, int clientHeight, Func<double, int> mapX, Func<double, int> mapY)
+        {
+            int xAxisY = mapY(0); 
+            int yAxisX = mapX(FunctionCalculator.XMin); 
             
-            // Лінія X-осі
-            g.DrawLine(Pens.Gray, (int)PADDING, xAxisY, clientWidth - (int)PADDING, xAxisY);
-            g.DrawString("X", SystemFonts.DefaultFont, Brushes.Black, clientWidth - PADDING + 5, xAxisY - 10);
-            
+            // Лінія X-осі (якщо Y=0 знаходиться в області малювання)
+            if (xAxisY >= PADDING && xAxisY <= clientHeight - PADDING)
+            {
+                g.DrawLine(_axesPen, PADDING, xAxisY, clientWidth - PADDING, xAxisY);
+                g.DrawString("X", SystemFonts.DefaultFont, Brushes.Black, clientWidth - PADDING + 5, xAxisY - 10);
+            }
+
             // Лінія Y-осі
-            g.DrawLine(Pens.Gray, yAxisX, (int)PADDING, yAxisX, clientHeight - (int)PADDING);
-            g.DrawString("Y", SystemFonts.DefaultFont, Brushes.Black, yAxisX - 15, (int)PADDING - 20);
+            g.DrawLine(_axesPen, yAxisX, PADDING, yAxisX, clientHeight - PADDING);
+            g.DrawString("Y", SystemFonts.DefaultFont, Brushes.Black, yAxisX - 15, PADDING - 20);
             
             // Мітка початку координат
-            g.DrawString($"({FunctionCalculator.XMin}, {_yMin:F2})", SystemFonts.DefaultFont, Brushes.Gray, (int)PADDING, clientHeight - (int)PADDING + 5);
+            g.DrawString($"{_yMin:F2}", SystemFonts.DefaultFont, Brushes.Gray, (int)PADDING, clientHeight - (int)PADDING + 5);
+        }
 
-            // 4. Малювання графіка
-            
+        /// <summary>
+        /// Малює обчислені точки графіка у вибраному режимі.
+        /// </summary>
+        private void DrawGraph(Graphics g, Func<double, int> mapX, Func<double, int> mapY)
+        {
             Point currentPoint;
             Point previousPoint = Point.Empty;
             
-            Pen plotPen = new Pen(Color.Blue, 2);
+            // Розмір маркера
+            const int markerSize = 6; 
 
             for (int i = 0; i < _dataPoints.Count; i++)
             {
-                currentPoint = new Point(ToScreenX(_dataPoints[i].X), ToScreenY(_dataPoints[i].Y));
+                currentPoint = new Point(mapX(_dataPoints[i].X), mapY(_dataPoints[i].Y));
                 
-                // Малюємо лінію між точками
                 if (i > 0)
                 {
-                    g.DrawLine(plotPen, previousPoint, currentPoint);
+                    // Режим: Лінійний
+                    if (_isLineMode)
+                    {
+                        g.DrawLine(_plotPen, previousPoint, currentPoint);
+                    }
                 }
                 
+                // Режим: Точковий або Лінійний (точки завжди малюємо)
+                g.FillEllipse(_pointBrush, currentPoint.X - markerSize / 2, currentPoint.Y - markerSize / 2, markerSize, markerSize);
+                
                 previousPoint = currentPoint;
-
-                // Малюємо точки
-                g.FillEllipse(Brushes.Red, currentPoint.X - 3, currentPoint.Y - 3, 6, 6);
             }
+        }
+
+        /// <summary>
+        /// Коректне звільнення GDI+ об'єктів.
+        /// </summary>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _plotPen?.Dispose();
+                _axesPen?.Dispose();
+                // Brushes.Red — системний об'єкт, не потребує Dispose, тому _pointBrush можна не звільняти, 
+                // якщо він ініціалізований системним Brushes. Якщо б ми створювали new SolidBrush(...), Dispose був би потрібен.
+            }
+            base.Dispose(disposing);
         }
     }
     
@@ -211,15 +285,13 @@ namespace LabWork
     // ====================================================================
     class Program
     {
-        // Атрибут [STAThread] є обов'язковим для Windows Forms
         [STAThread] 
         static void Main(string[] args)
         {
-            // Конфігурація середовища Windows Forms
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             
-            // Запуск форми з графіком
+            // Запуск форми
             Application.Run(new PlottingForm());
         }
     }
